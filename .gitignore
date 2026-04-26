@@ -1,0 +1,35 @@
+# Java
+backend/target/
+*.class
+*.jar
+*.war
+
+# Node
+frontend/node_modules/
+frontend/build/
+frontend/.env.local
+frontend/.env.production
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Docker
+.docker/
+
+# AWS
+.aws/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+
+# Secrets — NEVER commit these
+**/secret.yaml
+**/.env
+*credentials*
+
+# OS
+.DS_Store
+Thumbs.db

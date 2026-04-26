@@ -1,0 +1,97 @@
+# ─────────────────────────────────────────────────────────
+# Backend Deployment
+# Image tag is replaced by Jenkins: BACKEND_IMAGE → ECR URI
+# ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskmanager-backend
+  labels:
+    app: taskmanager
+    tier: backend
+    version: "1.0"
+spec:
+  replicas: 2             # overridden per overlay (dev=1, prod=3)
+  selector:
+    matchLabels:
+      app: taskmanager
+      tier: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # zero-downtime: never take pods down before new ones are up
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: taskmanager
+        tier: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path:   "/actuator/prometheus"
+        prometheus.io/port:   "8080"
+    spec:
+      # Graceful shutdown: give Spring Boot time to finish in-flight requests
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: backend
+          image: BACKEND_IMAGE       # replaced by Jenkins sed
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+              name: http
+
+          # ── Environment (non-sensitive) from ConfigMap ────────────────────
+          envFrom:
+            - configMapRef:
+                name: taskmanager-config
+
+          # ── Sensitive values from K8s Secret (synced from Secrets Manager) ─
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskmanager-db-secret
+                  key: db-password
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: taskmanager-db-secret
+                  key: db-username
+
+          # ── Resource limits (ALWAYS set these — prevents noisy neighbour) ──
+          resources:
+            requests:
+              cpu:    "250m"
+              memory: "256Mi"
+            limits:
+              cpu:    "500m"
+              memory: "512Mi"
+
+          # ── Readiness probe: pod only gets traffic when Spring Boot is UP ──
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # ── Liveness probe: restart pod if it hangs ────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            failureThreshold: 3
+
+          # ── Startup probe: prevents liveness killing during slow startup ───
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 10

@@ -1,0 +1,21 @@
+# ─────────────────────────────────────────────────────────
+# Backend Service — ClusterIP (internal only)
+# ALB routes to it via Ingress; not directly exposed outside
+# ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskmanager-backend-svc
+  labels:
+    app: taskmanager
+    tier: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: taskmanager
+    tier: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

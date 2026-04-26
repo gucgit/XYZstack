@@ -1,0 +1,21 @@
+# ─────────────────────────────────────────────────────────
+# ConfigMap — non-sensitive configuration
+# Sensitive values (DB password, etc.) go in Secrets, NOT here
+# ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskmanager-config
+data:
+  # Database connection (host + name are not sensitive)
+  DB_HOST: "taskmanager-db.us-east-1.rds.amazonaws.com"  # RDS endpoint
+  DB_NAME: "taskdb"
+
+  # CORS — update to your CloudFront URL after setup
+  CORS_ALLOWED_ORIGINS: "http://taskmanager-frontend-svc"
+
+  # Spring Boot profile
+  SPRING_PROFILES_ACTIVE: "prod"
+
+  # JVM timezone
+  TZ: "Asia/Kolkata"

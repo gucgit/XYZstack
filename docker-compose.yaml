@@ -1,0 +1,85 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────
+# Local development: all three tiers running in Docker
+# Usage: docker compose up --build
+#
+# Frontend  → http://localhost:3000
+# Backend   → http://localhost:8080
+# DB        → localhost:5432  (postgres / taskpass)
+# ─────────────────────────────────────────────────────────
+
+services:
+
+  # ── Database (mimics RDS PostgreSQL locally) ───────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: taskmanager-db
+    environment:
+      POSTGRES_DB:       taskdb
+      POSTGRES_USER:     taskuser
+      POSTGRES_PASSWORD: taskpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskuser -d taskdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskmanager-net
+
+  # ── Backend (Spring Boot) ──────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: taskmanager-backend
+    environment:
+      DB_HOST:              postgres
+      DB_NAME:              taskdb
+      DB_USERNAME:          taskuser
+      DB_PASSWORD:          taskpass
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider",
+             "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taskmanager-net
+    restart: unless-stopped
+
+  # ── Frontend (React → Nginx) ───────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Points to backend via host machine in local dev
+        REACT_APP_API_URL: http://localhost:8080
+    container_name: taskmanager-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - taskmanager-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  taskmanager-net:
+    driver: bridge

@@ -1,0 +1,307 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Jenkinsfile — TaskManager CI/CD Pipeline
+// Triggers on: git push to main or develop branch (GitHub webhook)
+//
+// Pipeline stages:
+//   1. Checkout
+//   2. Unit Tests (Maven)
+//   3. Build JAR
+//   4. Docker Build (backend + frontend)
+//   5. Push to ECR
+//   6. Deploy to EKS (kubectl apply)
+//   7. Health check
+//   8. Notify
+//
+// Jenkins plugins required:
+//   - Pipeline, Git, Docker Pipeline, AWS Steps,
+//     Kubernetes CLI, Slack Notification
+//
+// Jenkins credentials (configure in Manage Jenkins → Credentials):
+//   - aws-credentials       → AWS Access Key + Secret (for ECR + EKS)
+//   - slack-webhook-url     → Secret text
+// ─────────────────────────────────────────────────────────────────────────────
+
+pipeline {
+
+    agent any
+
+    // ── Tools (configured in Jenkins Global Tool Configuration) ──────────────
+    tools {
+        maven 'Maven-3.9'   // name given when configuring Maven in Jenkins
+        jdk   'JDK-17'      // name given when configuring JDK in Jenkins
+    }
+
+    // ── Environment variables ─────────────────────────────────────────────────
+    environment {
+        // AWS + ECR
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '123456789012'          // ← replace with your AWS account ID
+        ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        BACKEND_REPO    = "${ECR_REGISTRY}/taskmanager-backend"
+        FRONTEND_REPO   = "${ECR_REGISTRY}/taskmanager-frontend"
+
+        // EKS
+        EKS_CLUSTER_NAME = 'taskmanager-cluster'
+        K8S_NAMESPACE    = 'taskmanager'
+
+        // Image tag — git short SHA + build number for full traceability
+        IMAGE_TAG = "${env.GIT_COMMIT?.take(7) ?: 'latest'}-${env.BUILD_NUMBER}"
+
+        // ALB DNS (set after EKS + ALB controller installed)
+        ALB_DNS = credentials('alb-dns-name')     // stored as Jenkins secret
+    }
+
+    // ── Pipeline options ──────────────────────────────────────────────────────
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+    }
+
+    // ── Build parameters ──────────────────────────────────────────────────────
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['dev', 'prod'],
+            description: 'Target deployment environment'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip unit tests (only for hotfixes)'
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    stages {
+
+        // ── Stage 1: Checkout ────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 1: Checkout               ║"
+                echo "╚══════════════════════════════════╝"
+                checkout scm
+                script {
+                    env.GIT_BRANCH_SHORT  = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    env.GIT_COMMIT_MSG    = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+                    env.GIT_AUTHOR        = sh(script: 'git log -1 --pretty=%an', returnStdout: true).trim()
+                }
+                echo "Branch  : ${env.GIT_BRANCH_SHORT}"
+                echo "Commit  : ${env.IMAGE_TAG}"
+                echo "Author  : ${env.GIT_AUTHOR}"
+                echo "Message : ${env.GIT_COMMIT_MSG}"
+            }
+        }
+
+        // ── Stage 2: Unit Tests ──────────────────────────────────────────────
+        stage('Unit Tests') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 2: Unit Tests             ║"
+                echo "╚══════════════════════════════════╝"
+                dir('backend') {
+                    sh 'mvn test -Dspring.profiles.active=test -B'
+                }
+            }
+            post {
+                always {
+                    // Publish JUnit test results
+                    junit 'backend/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        // ── Stage 3: Build JAR ───────────────────────────────────────────────
+        stage('Build JAR') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 3: Build JAR              ║"
+                echo "╚══════════════════════════════════╝"
+                dir('backend') {
+                    sh 'mvn clean package -DskipTests -B'
+                    sh 'ls -lh target/*.jar'
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'backend/target/*.jar', fingerprint: true
+                }
+            }
+        }
+
+        // ── Stage 4: Docker Build ────────────────────────────────────────────
+        stage('Docker Build') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 4: Docker Build           ║"
+                echo "╚══════════════════════════════════╝"
+                script {
+                    // Backend image
+                    sh """
+                        docker build \
+                            -t ${BACKEND_REPO}:${IMAGE_TAG} \
+                            -t ${BACKEND_REPO}:latest \
+                            ./backend
+                    """
+
+                    // Frontend image — pass ALB DNS as build arg
+                    sh """
+                        docker build \
+                            --build-arg REACT_APP_API_URL=http://${ALB_DNS} \
+                            -t ${FRONTEND_REPO}:${IMAGE_TAG} \
+                            -t ${FRONTEND_REPO}:latest \
+                            ./frontend
+                    """
+
+                    // Show image sizes
+                    sh "docker images | grep taskmanager"
+                }
+            }
+        }
+
+        // ── Stage 5: Push to ECR ─────────────────────────────────────────────
+        stage('Push to ECR') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 5: Push to ECR            ║"
+                echo "╚══════════════════════════════════╝"
+                withAWS(credentials: 'aws-credentials', region: "${AWS_REGION}") {
+                    script {
+                        // Authenticate Docker with ECR
+                        sh """
+                            aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        """
+
+                        // Push backend
+                        sh "docker push ${BACKEND_REPO}:${IMAGE_TAG}"
+                        sh "docker push ${BACKEND_REPO}:latest"
+
+                        // Push frontend
+                        sh "docker push ${FRONTEND_REPO}:${IMAGE_TAG}"
+                        sh "docker push ${FRONTEND_REPO}:latest"
+
+                        echo "Pushed images with tag: ${IMAGE_TAG}"
+                    }
+                }
+            }
+        }
+
+        // ── Stage 6: Deploy to EKS ───────────────────────────────────────────
+        stage('Deploy to EKS') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 6: Deploy to EKS          ║"
+                echo "╚══════════════════════════════════╝"
+                withAWS(credentials: 'aws-credentials', region: "${AWS_REGION}") {
+                    script {
+                        // Update kubeconfig to point at EKS cluster
+                        sh """
+                            aws eks update-kubeconfig \
+                                --name ${EKS_CLUSTER_NAME} \
+                                --region ${AWS_REGION}
+                        """
+
+                        // Create namespace if it doesn't exist
+                        sh "kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
+
+                        // Update image tags in manifests (sed in-place)
+                        sh """
+                            sed -i 's|BACKEND_IMAGE|${BACKEND_REPO}:${IMAGE_TAG}|g' \
+                                k8s/base/backend-deployment.yaml
+
+                            sed -i 's|FRONTEND_IMAGE|${FRONTEND_REPO}:${IMAGE_TAG}|g' \
+                                k8s/base/frontend-deployment.yaml
+                        """
+
+                        // Apply the correct overlay based on deploy param
+                        sh """
+                            kubectl apply -k k8s/overlays/${params.DEPLOY_ENV} \
+                                --namespace ${K8S_NAMESPACE}
+                        """
+
+                        // Wait for rollout to complete (max 5 minutes)
+                        sh """
+                            kubectl rollout status deployment/taskmanager-backend \
+                                --namespace ${K8S_NAMESPACE} --timeout=300s
+
+                            kubectl rollout status deployment/taskmanager-frontend \
+                                --namespace ${K8S_NAMESPACE} --timeout=300s
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 7: Health Check ────────────────────────────────────────────
+        stage('Health Check') {
+            steps {
+                echo "╔══════════════════════════════════╗"
+                echo "║  Stage 7: Health Check           ║"
+                echo "╚══════════════════════════════════╝"
+                script {
+                    // Wait for ALB to register the new pods
+                    sleep(time: 20, unit: 'SECONDS')
+
+                    // Hit the Spring Boot actuator health endpoint
+                    def response = sh(
+                        script: """
+                            curl -sf --retry 5 --retry-delay 5 \
+                                http://${ALB_DNS}/actuator/health | grep -o '"status":"UP"'
+                        """,
+                        returnStatus: true
+                    )
+                    if (response != 0) {
+                        error "Health check failed — deployment may be broken"
+                    }
+                    echo "Health check passed — application is UP"
+                }
+            }
+        }
+    }
+
+    // ── Post-pipeline actions ─────────────────────────────────────────────────
+    post {
+        success {
+            echo "Pipeline completed successfully!"
+            slackSend(
+                channel: '#deployments',
+                color:   'good',
+                message: """
+                    ✅ *Deploy Succeeded* — `${env.JOB_NAME}` #${env.BUILD_NUMBER}
+                    Branch  : `${env.GIT_BRANCH_SHORT}`
+                    Commit  : `${env.IMAGE_TAG}`
+                    Author  : ${env.GIT_AUTHOR}
+                    Env     : ${params.DEPLOY_ENV}
+                    <${env.BUILD_URL}|View Build>
+                """.stripIndent()
+            )
+        }
+        failure {
+            slackSend(
+                channel: '#deployments',
+                color:   'danger',
+                message: """
+                    ❌ *Deploy Failed* — `${env.JOB_NAME}` #${env.BUILD_NUMBER}
+                    Branch  : `${env.GIT_BRANCH_SHORT}`
+                    Commit  : `${env.IMAGE_TAG}`
+                    Author  : ${env.GIT_AUTHOR}
+                    <${env.BUILD_URL}|Investigate>
+                """.stripIndent()
+            )
+        }
+        always {
+            // Clean up local Docker images to save disk
+            sh """
+                docker rmi ${BACKEND_REPO}:${IMAGE_TAG}  || true
+                docker rmi ${FRONTEND_REPO}:${IMAGE_TAG} || true
+            """
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,63 @@
+# Install with:
+# helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+# helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+#   -f monitoring/prometheus-values.yaml \
+#   --namespace monitoring --create-namespace
+
+prometheus:
+  prometheusSpec:
+    # Scrape interval
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # Auto-discover pods with prometheus annotations
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+
+    # Additional scrape config to pick up /actuator/prometheus
+    additionalScrapeConfigs:
+      - job_name: 'taskmanager-backend'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - taskmanager
+                - taskmanager-dev
+                - taskmanager-prod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+):(?:\d+);(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+grafana:
+  enabled: true
+  adminPassword: "admin"   # change this or use a secret
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          folder: TaskManager
+          type: file
+          disableDeletion: false
+          options:
+            path: /var/lib/grafana/dashboards/default
+  # Pre-load JVM dashboard
+  dashboards:
+    default:
+      jvm-dashboard:
+        gnetId: 11955      # JVM Micrometer dashboard from grafana.com
+        revision: 1
+        datasource: Prometheus
