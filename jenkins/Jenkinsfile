@@ -305,3 +305,4 @@ pipeline {
         }
     }
 }
+sh 'CI=false npm run build'
