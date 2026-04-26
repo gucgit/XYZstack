@@ -1,0 +1,56 @@
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Verify Tools') {
+            steps {
+                sh 'echo "Checking tools..."'
+                sh 'java -version || true'
+                sh 'mvn -version || true'
+                sh 'node -v || true'
+                sh 'npm -v || true'
+                sh 'docker -v || true'
+            }
+        }
+
+        stage('Build Backend (Maven)') {
+            steps {
+                dir('backend') {
+                    sh 'mvn clean package -DskipTests'
+                }
+            }
+        }
+
+        stage('Build Frontend (React)') {
+            steps {
+                dir('frontend') {
+                    sh 'npm install'
+                    sh 'npm run build'
+                }
+            }
+        }
+
+        stage('Docker Build Backend') {
+            steps {
+                dir('backend') {
+                    sh 'docker build -t taskmanager-backend .'
+                }
+            }
+        }
+
+        stage('Docker Build Frontend') {
+            steps {
+                dir('frontend') {
+                    sh 'docker build -t taskmanager-frontend .'
+                }
+            }
+        }
+    }
+}
