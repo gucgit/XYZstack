@@ -1,5 +1,10 @@
 pipeline {
     agent any
+
+    environment {
+        DOCKERHUB_USER = 'umeshchandraguc'
+    }
+
     stages {
         stage('Checkout') {
             steps {
@@ -31,17 +36,27 @@ pipeline {
                 }
             }
         }
-        stage('Docker Build Backend') {
+        stage('Docker Build') {
             steps {
                 dir('backend') {
-                    sh 'docker build -t taskmanager-backend .'
+                    sh "docker build -t ${DOCKERHUB_USER}/taskmanager-backend:latest ."
+                }
+                dir('frontend') {
+                    sh "docker build -t ${DOCKERHUB_USER}/taskmanager-frontend:latest ."
                 }
             }
         }
-        stage('Docker Build Frontend') {
+        stage('Docker Push') {
             steps {
-                dir('frontend') {
-                    sh 'docker build -t taskmanager-frontend .'
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
+                    sh "docker push ${DOCKERHUB_USER}/taskmanager-backend:latest"
+                    sh "docker push ${DOCKERHUB_USER}/taskmanager-frontend:latest"
+                    sh 'docker logout'
                 }
             }
         }
